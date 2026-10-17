@@ -1,7 +1,7 @@
 # Video generator: ARCHITECTURE.md
 
 **Read this before touching anything.** It records intent, not every file. Verified 2026-10-17 against
-`main` of this repo and the live Supabase project `qtfztrasuxkcagursajb` (read-only queries).
+`master` of this repo and the live Supabase project `qtfztrasuxkcagursajb` (read-only queries).
 
 ## 1. What is the system?
 
@@ -72,8 +72,9 @@ that keeps the rule.**
 ## Known gaps (true today, not design)
 
 - `authenticated` still holds Postgres's default `DELETE` and `TRUNCATE` grants on `videos`. RLS blocks
-  DELETE (no policy) and the Data API cannot TRUNCATE, but revoking both would be tighter. Needs a migration.
-- The migration file has no rollback or verification block.
+  DELETE (no policy) and the Data API cannot TRUNCATE, but revoking both is tighter. The fix is written,
+  not yet applied: `supabase/migrations/20261017010000_tighten_videos_grants.sql`.
+- The first migration file (`20261017000000_create_videos.sql`) has no rollback or verification block.
 - The system prompt has been run once per vibe only; there is no test table with golden answers yet.
 - No favicon; the browser logs one 404 for it.
 - `src/render/Player.tsx` is a placeholder until motion-engineer's renderer lands.
