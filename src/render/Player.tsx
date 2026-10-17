@@ -6,8 +6,15 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 import type { Plan, Vibe } from "@/lib/plan";
 import { FORMATS, drawFrame, frameSize, planDuration, type Format } from "./render";
 import { renderAudio } from "./audio";
+import { CodePlayer, type CodePlayerProps } from "./CodePlayer";
 
-export type PlayerProps = { plan: Plan; vibe: Vibe };
+export type PlanPlayerProps = { plan: Plan; vibe: Vibe };
+/** A row has either a plan (scene renderer) or model-written code (sandboxed CodePlayer). */
+export type PlayerProps = PlanPlayerProps | CodePlayerProps;
+
+export function Player(props: PlayerProps) {
+  return "code" in props ? <CodePlayer {...props} /> : <PlanPlayer {...props} />;
+}
 
 type Phase = "idle" | "preparing" | "playing" | "exporting";
 
@@ -23,7 +30,7 @@ export function fileName(plan: Plan, vibe: Vibe, format: Format = "16:9"): strin
   return `${slug}-${vibe}${format === "9:16" ? "-9x16" : ""}.webm`;
 }
 
-export function Player({ plan, vibe }: PlayerProps) {
+function PlanPlayer({ plan, vibe }: PlanPlayerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const audioRef = useRef<AudioContext | null>(null);
   const abortRef = useRef<AbortController | null>(null);
