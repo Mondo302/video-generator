@@ -6,6 +6,7 @@ import { handleCancel, handleCreate, handleFix, handleGet } from "../src/lib/vid
 import type { CodeRequest, CodeVideoRow, CodeVideoStore, GenerateCode, JobDeps, Usage } from "../src/lib/video-jobs.ts";
 import { buildVideoInput, extractModule } from "../src/lib/video-module.ts";
 import { buildVideoPrompt } from "../src/lib/video-prompt.ts";
+import { firstLine, isStale, statusLabel } from "../src/lib/video-status.ts";
 
 type Row = CodeVideoRow & { owner: string; model: string };
 
@@ -19,7 +20,7 @@ function memoryStore() {
       const id = `row-${rows.length + 1}`;
       rows.push({
         id, owner: current!, model, prompt, format, vibe, status: "generating", error: null,
-        code: null, fix_attempts: 0, input_tokens: null, output_tokens: null,
+        code: null, fix_attempts: 0, input_tokens: null, output_tokens: null, updated_at: new Date().toISOString(),
       });
       return id;
     },
@@ -236,6 +237,64 @@ describe("fix", () => {
     t.as("user-b");
     assert.equal((await handleFix("row-1", fixBody("x"), t.deps)).status, 404);
     await t.settle();
+  });
+});
+
+describe("stale sweep (a generating row nothing can finish)", () => {
+  const SEVEN_MIN = 7 * 60_000;
+
+  async function orphan(extra: Partial<JobDeps> = {}) {
+    const t = setup(returns(MODULE_A), extra);
+    await t.store.insertGenerating({ prompt: GOOD.prompt, format: "16:9", vibe: null, model: "gpt-6-astra" });
+    return t; // a row with no job behind it, as after a server restart
+  }
+
+  it("older than 6 min with no live job: reads as failed / timeout and is stored that way", async () => {
+    const t = await orphan({ now: () => Date.now() + SEVEN_MIN });
+    const res = await handleGet("row-1", t.deps);
+    assert.deepEqual(await res.json(), { status: "failed", error: "timeout", format: "16:9" });
+    assert.equal(t.rows[0].status, "failed");
+    assert.equal(t.rows[0].error, "timeout");
+  });
+
+  it("is left alone while a job is still running, or when it is younger than 6 min", async () => {
+    const running = await orphan({ now: () => Date.now() + SEVEN_MIN });
+    running.deps.jobs.set("row-1", new AbortController());
+    assert.equal((await (await handleGet("row-1", running.deps)).json()).status, "generating");
+
+    const fresh = await orphan({ now: () => Date.now() + 60_000 });
+    assert.equal((await (await handleGet("row-1", fresh.deps)).json()).status, "generating");
+    assert.equal(fresh.rows[0].status, "generating");
+  });
+
+  it("a stale row cannot be cancelled any more (409, it already timed out)", async () => {
+    const t = await orphan({ now: () => Date.now() + SEVEN_MIN });
+    assert.equal((await handleCancel("row-1", t.deps)).status, 409);
+    assert.equal(t.rows[0].error, "timeout");
+  });
+});
+
+describe("status words and titles", () => {
+  it("maps status + error to what a person reads", () => {
+    assert.equal(statusLabel("generating", null), "Writing");
+    assert.equal(statusLabel("ready", null), "Ready");
+    assert.equal(statusLabel("failed", "timeout"), "Timed out");
+    assert.equal(statusLabel("failed", "cancelled"), "Cancelled");
+    assert.equal(statusLabel("failed", "invalid_code"), "Failed");
+    assert.equal(statusLabel("failed", "model_error: 500"), "Failed");
+  });
+
+  it("firstLine keeps only the first line and shortens it", () => {
+    assert.equal(firstLine("  Bakery intro\nwarm, pixel art"), "Bakery intro");
+    assert.equal(firstLine("x".repeat(100), 10), "xxxxxxxxx…");
+  });
+
+  it("isStale needs all three: generating, no job, older than 6 min", () => {
+    const old = { status: "generating", updated_at: new Date(0).toISOString() };
+    assert.equal(isStale(old, 7 * 60_000, false), true);
+    assert.equal(isStale(old, 7 * 60_000, true), false);
+    assert.equal(isStale(old, 5 * 60_000, false), false);
+    assert.equal(isStale({ ...old, status: "ready" }, 7 * 60_000, false), false);
   });
 });
 

@@ -1,17 +1,15 @@
-const styles: Record<string, string> = {
-  ready: "text-emerald-300",
-  generating: "text-amber-300",
-  failed: "text-red-300",
+import { statusLabel, type StatusLabel } from "@/lib/video-status";
+
+const styles: Record<StatusLabel, string> = {
+  Writing: "text-amber-300",
+  Ready: "text-emerald-300",
+  Failed: "text-red-300",
+  "Timed out": "text-red-300",
+  Cancelled: "text-zinc-400",
 };
 
-const FAILED_REASONS: Record<string, string> = {
-  cancelled: "Cancelled",
-  timeout: "Timed out",
-};
-
-/** Row status in words; a failed row says why when the reason is known. */
+/** Row status in words: Writing, Ready, Failed, Timed out or Cancelled. */
 export function StatusBadge({ status, error }: { status: string; error: string | null }) {
-  const reason = status === "failed" ? FAILED_REASONS[error ?? ""] : undefined;
-  const label = reason ?? status.charAt(0).toUpperCase() + status.slice(1);
-  return <span className={styles[status] ?? "text-zinc-400"}>{label}</span>;
+  const label = statusLabel(status, error);
+  return <span className={styles[label]}>{label}</span>;
 }

@@ -2,6 +2,7 @@
 // Store, generator, job registry and scheduler are injected, so every path is tested without
 // network or database. Erasable TypeScript only (node --test runs this file directly).
 import { z } from "zod";
+import { isStale } from "./video-status.ts";
 
 export const FORMATS = ["16:9", "9:16"] as const;
 export type Format = (typeof FORMATS)[number];
@@ -37,6 +38,8 @@ export type CodeVideoRow = {
   fix_attempts: number;
   input_tokens: number | null;
   output_tokens: number | null;
+  /** When the current generation (or the last change) started; a fix restarts it. */
+  updated_at: string;
 };
 
 /** The videos table as the signed-in user sees it (RLS applies in the real adapter). */
@@ -60,7 +63,36 @@ export type JobDeps = {
   /** Runs the task after the response is sent (next/server `after` in the app). */
   schedule: (task: () => Promise<void>) => void;
   timeoutMs?: number;
+  /** Clock for the stale check; tests pass a fixed one. */
+  now?: () => number;
 };
+
+type ReadDeps = Pick<JobDeps, "store" | "jobs" | "now">;
+
+/**
+ * Marks stale "generating" rows failed / timeout (see isStale) and returns them as stored.
+ * Called on every read, so a row orphaned by a restart never shows "Writing" forever.
+ */
+export async function sweepStale<T extends { id: string; status: string; error: string | null; updated_at: string }>(
+  rows: T[],
+  deps: { store: Pick<CodeVideoStore, "markFailed">; jobs: Map<string, AbortController>; now?: () => number },
+): Promise<T[]> {
+  const now = (deps.now ?? Date.now)();
+  return Promise.all(
+    rows.map(async (row) => {
+      if (!isStale(row, now, deps.jobs.has(row.id))) return row;
+      await deps.store.markFailed(row.id, "timeout");
+      return { ...row, status: "failed", error: "timeout" };
+    }),
+  );
+}
+
+async function readOwn(id: string, deps: ReadDeps): Promise<CodeVideoRow | null> {
+  const row = await deps.store.getOwn(id);
+  if (!row) return null;
+  const [swept] = await sweepStale([row], deps);
+  return swept;
+}
 
 const CreateInput = z.object({
   prompt: z
@@ -112,9 +144,9 @@ export async function handleCreate(request: Request, deps: JobDeps): Promise<Res
 }
 
 /** GET /api/videos/[id] -> {status, error, format, code?} for the owner; 404 otherwise. */
-export async function handleGet(id: string, deps: Pick<JobDeps, "store">): Promise<Response> {
+export async function handleGet(id: string, deps: ReadDeps): Promise<Response> {
   if (!(await deps.store.userId())) return json(401, { error: "no session" });
-  const row = await deps.store.getOwn(id);
+  const row = await readOwn(id, deps);
   if (!row) return json(404, { error: "not found" });
   return json(200, {
     status: row.status,
@@ -125,9 +157,9 @@ export async function handleGet(id: string, deps: Pick<JobDeps, "store">): Promi
 }
 
 /** POST /api/videos/[id]/cancel: aborts the upstream call and marks the row failed / cancelled. */
-export async function handleCancel(id: string, deps: Pick<JobDeps, "store" | "jobs">): Promise<Response> {
+export async function handleCancel(id: string, deps: ReadDeps): Promise<Response> {
   if (!(await deps.store.userId())) return json(401, { error: "no session" });
-  const row = await deps.store.getOwn(id);
+  const row = await readOwn(id, deps);
   if (!row) return json(404, { error: "not found" });
   if (row.status !== "generating") return json(409, { error: "not generating", status: row.status });
   deps.jobs.get(id)?.abort();
@@ -143,7 +175,7 @@ export async function handleFix(id: string, request: Request, deps: JobDeps): Pr
   const input = FixInput.safeParse(parsed.body);
   if (!input.success) return fieldError(input.error);
 
-  const row = await deps.store.getOwn(id);
+  const row = await readOwn(id, deps);
   if (!row) return json(404, { error: "not found" });
   if (!row.code) return json(409, { error: "no code to fix" });
   if (row.status === "generating") return json(409, { error: "still generating" });

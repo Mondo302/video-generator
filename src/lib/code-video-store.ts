@@ -2,7 +2,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSessionUserId } from "./supabase/core";
 import type { CodeVideoRow, CodeVideoStore } from "./video-jobs";
 
-const COLUMNS = "id, prompt, vibe, format, status, error, code, fix_attempts, input_tokens, output_tokens";
+const COLUMNS =
+  "id, prompt, vibe, format, status, error, code, fix_attempts, input_tokens, output_tokens, updated_at";
 
 /** The real CodeVideoStore: the videos table through the signed-in user's client, so RLS applies. */
 export function supabaseCodeVideoStore(supabase: SupabaseClient): CodeVideoStore {
