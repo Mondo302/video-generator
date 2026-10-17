@@ -8,7 +8,7 @@ export default function Home() {
       <header className="mb-8">
         <h1 className="text-2xl font-semibold tracking-tight text-zinc-100">Video generator</h1>
         <p className="mt-2 text-sm text-zinc-400">
-          Type a topic and pick a vibe. You get a short video, one scene at a time.
+          Describe the video you want, style included. It plays here and downloads as a video file.
         </p>
       </header>
 
