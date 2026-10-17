@@ -77,4 +77,4 @@ that keeps the rule.**
 - The first migration file (`20261017000000_create_videos.sql`) has no rollback or verification block.
 - The system prompt has been run once per vibe only; there is no test table with golden answers yet.
 - No favicon; the browser logs one 404 for it.
-- `src/render/Player.tsx` is a placeholder until motion-engineer's renderer lands.
+- `src/render/` uses Windows system fonts (Georgia, Segoe UI, Arial Black, Courier New); on macOS or a phone the video looks different. Export needs WebCodecs (Chrome/Edge); other browsers get a plain "can't export" line.
