@@ -1,11 +1,14 @@
-// Pure scene renderer: the same (t, plan, vibe) always gives the same pixels.
+// Pure scene renderer: the same (t, plan, vibe, format) always gives the same pixels.
 // Type-only imports keep zod out of the client bundle.
 import type { Plan, Scene, Vibe } from "@/lib/plan";
 
-export const W = 1280;
-export const H = 720;
-const LW = 320;
-const LH = 180;
+/** Render-time frame shape. Not stored: the plan is the video, the format is a filter. */
+export type Format = "16:9" | "9:16";
+export const FORMATS: readonly Format[] = ["16:9", "9:16"];
+export function frameSize(format: Format): { w: number; h: number } {
+  return format === "9:16" ? { w: 720, h: 1280 } : { w: 1280, h: 720 };
+}
+const LOW = 4; // retro draws at a quarter of the size, then scales up with hard pixels
 
 type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 type Scheme = { bg: string; fg: string; dim: string; acc: string };
@@ -16,7 +19,7 @@ type VibeStyle = Scheme & {
   lead: number; // entrances start this much before their delay
   inDur: number;
   stagger: number;
-  low: boolean; // retro: draw at 320x180, 4 colours, stepped time
+  low: boolean; // retro: quarter size, 4 colours, stepped time
   fps?: number;
   pal?: string[];
   schemes?: Scheme[];
@@ -91,16 +94,17 @@ export function cues(plan: Plan, vibe: Vibe): Cue[] {
 type Scratch = { c: OffscreenCanvas | HTMLCanvasElement; g: Ctx };
 const cache: Record<string, Scratch> = {};
 function scratch(key: string, w: number, h: number): Scratch {
-  if (!cache[key]) {
+  const k = `${key}${w}x${h}`;
+  if (!cache[k]) {
     const c: OffscreenCanvas | HTMLCanvasElement =
       typeof OffscreenCanvas !== "undefined"
         ? new OffscreenCanvas(w, h)
         : Object.assign(document.createElement("canvas"), { width: w, height: h });
     const g = c.getContext("2d", { willReadFrequently: true }) as Ctx | null;
     if (!g) throw new Error("2D canvas is not available");
-    cache[key] = { c, g };
+    cache[k] = { c, g };
   }
-  return cache[key];
+  return cache[k];
 }
 const font = (tpl: string, s: number) => tpl.replace("{s}", String(Math.round(s)));
 function wrap(g: Ctx, text: string, maxW: number): string[] {
@@ -128,6 +132,13 @@ function wrapBalanced(g: Ctx, text: string, maxW: number): string[] {
     else hi = mid;
   }
   return wrap(g, text, hi);
+}
+/** Font size at which the widest unbreakable piece fits: one word, or the whole text when noWrap. */
+function fitSize(g: Ctx, tpl: string, size: number, text: string, maxW: number, noWrap = false): number {
+  g.font = font(tpl, size);
+  const pieces = noWrap ? [text] : text.split(" ");
+  const widest = Math.max(1, ...pieces.map((p) => g.measureText(p).width));
+  return widest > maxW ? Math.floor(size * (maxW / widest)) : size;
 }
 const schemeFor = (V: VibeStyle, i: number): Scheme => (V.schemes ? V.schemes[i % V.schemes.length] : V);
 
@@ -169,19 +180,25 @@ function drawBg(g: Ctx, w: number, h: number, V: VibeStyle, S: Scheme, t: number
 }
 
 function drawScene(g: Ctx, w: number, h: number, sc: TimedScene, i: number, lt: number, V: VibeStyle, t: number) {
-  const u = h / 720;
+  const tall = h > w;
+  const u = Math.min(w, h) / 720; // sizes follow the short side, so 9:16 keeps the 16:9 type size
   const S = schemeFor(V, i);
   drawBg(g, w, h, V, S, t, u);
   g.textBaseline = "top";
   g.textAlign = "left";
-  const L = 120 * u;
+  const L = (tall ? 64 : 120) * u; // side margin
+  const textW = w - 2 * L;
   const ch = V.low ? h - 16 : h; // retro keeps clear of the brick band
   const sz = (smooth: number, retro: number) => (V.low ? retro : smooth) * u;
   if (sc.type === "title") {
-    const fs = sz(92, 84), bs = sz(32, 44), lh = fs * 1.12;
+    const maxW = tall ? textW : w * 0.8;
+    const fs = fitSize(g, V.head, sz(92, 84), sc.heading, maxW), lh = fs * 1.12;
+    const bs = sz(32, 44), blh = bs * 1.35;
     g.font = font(V.head, fs);
-    const lines = wrapBalanced(g, sc.heading, w * 0.8);
-    const blockH = lines.length * lh + 32 * u + (sc.body ? 34 * u + bs : 0);
+    const lines = wrapBalanced(g, sc.heading, maxW);
+    g.font = font(V.body, bs);
+    const bl = sc.body ? wrapBalanced(g, sc.body, maxW) : [];
+    const blockH = lines.length * lh + 32 * u + (bl.length ? 34 * u + bl.length * blh : 0);
     let y = (ch - blockH) / 2;
     g.textAlign = "center";
     lines.forEach((ln, k) =>
@@ -197,14 +214,13 @@ function drawScene(g: Ctx, w: number, h: number, sc: TimedScene, i: number, lt: 
       g.fillStyle = S.acc;
       g.fillRect(Math.round(w / 2 - rw / 2), y, rw, Math.max(1, 6 * u));
     }, u);
-    const body = sc.body;
-    if (body) enter(g, V, lt, D.titleBody, () => { g.font = font(V.body, bs); g.fillStyle = S.dim; g.fillText(body, w / 2, y + 34 * u); }, u);
+    if (bl.length) enter(g, V, lt, D.titleBody, () => { g.font = font(V.body, bs); g.fillStyle = S.dim; bl.forEach((ln, k) => g.fillText(ln, w / 2, y + 34 * u + k * blh)); }, u);
   } else if (sc.type === "text") {
-    const fs = sz(68, 60), bs = sz(36, 46), lh = fs * 1.12, blh = bs * 1.4;
+    const fs = fitSize(g, V.head, sz(68, 60), sc.heading, textW), bs = sz(36, 46), lh = fs * 1.12, blh = bs * 1.4;
     g.font = font(V.head, fs);
-    const hl = wrapBalanced(g, sc.heading, w - 2 * L);
+    const hl = wrapBalanced(g, sc.heading, textW);
     g.font = font(V.body, bs);
-    const bl = sc.body ? wrapBalanced(g, sc.body, V.low ? w - 2 * L : w * 0.62) : [];
+    const bl = sc.body ? wrapBalanced(g, sc.body, V.low || tall ? textW : w * 0.62) : [];
     const blockH = 40 * u + hl.length * lh + (bl.length ? 40 * u + bl.length * blh : 0);
     let y = (ch - blockH) / 2 + 40 * u;
     enter(g, V, lt, 0, (raw) => { g.fillStyle = S.acc; g.fillRect(L, y - 34 * u, 70 * u * (V.low ? raw : outCubic(raw)), Math.max(1, 6 * u)); }, u);
@@ -212,26 +228,49 @@ function drawScene(g: Ctx, w: number, h: number, sc: TimedScene, i: number, lt: 
     y += hl.length * lh + 40 * u;
     bl.forEach((ln, k) => enter(g, V, lt, D.textBody + k * V.stagger * 0.5, () => { g.font = font(V.body, bs); g.fillStyle = S.dim; g.fillText(ln, L, y + k * blh); }, u));
   } else if (sc.type === "list") {
-    const fs = sz(60, 60), is = sz(42, 46), step = 96 * u;
-    const items = (sc.items ?? []).slice(0, 4);
-    const blockH = fs * 1.12 + 50 * u + Math.max(0, items.length - 1) * step + is * 1.2;
+    // Lay the list out; if it is taller than the frame minus margins, shrink the type (never below 60%).
+    const lay = (k: number) => {
+      const fs = fitSize(g, V.head, sz(60, 60) * k, sc.heading, textW), is = sz(42, 46) * k, ilh = is * 1.2;
+      const gap = (tall ? 40 : 46) * u * k, hg = 50 * u * k, indent = 60 * u;
+      g.font = font(V.head, fs);
+      const hl = wrapBalanced(g, sc.heading, textW);
+      g.font = font(V.body, is);
+      const items = (sc.items ?? []).slice(0, 4).map((it) => wrapBalanced(g, it, textW - indent));
+      const itemsH = items.reduce((s, ls) => s + ls.length * ilh, 0) + Math.max(0, items.length - 1) * gap;
+      return { k, fs, is, ilh, gap, hg, indent, hl, items, blockH: hl.length * fs * 1.12 + hg + itemsH };
+    };
+    const room = ch - 2 * 56 * u;
+    let lo = lay(1);
+    for (let n = 0; n < 3 && lo.blockH > room && lo.k > 0.6; n++) lo = lay(Math.max(0.6, lo.k * (room / lo.blockH)));
+    const { fs, is, ilh, gap, hg, indent, hl, items, blockH } = lo;
     const y0 = (ch - blockH) / 2;
-    enter(g, V, lt, 0, () => { g.font = font(V.head, fs); g.fillStyle = S.fg; g.fillText(sc.heading, L, y0); }, u);
-    items.forEach((it, k) => {
-      const y = y0 + fs * 1.12 + 50 * u + k * step;
+    enter(g, V, lt, 0, () => { g.font = font(V.head, fs); g.fillStyle = S.fg; hl.forEach((ln, k) => g.fillText(ln, L, y0 + k * fs * 1.12)); }, u);
+    let y = y0 + hl.length * fs * 1.12 + hg;
+    items.forEach((ls, k) => {
+      const yk = y;
       enter(g, V, lt, listItemDelay(V, k), () => {
         g.fillStyle = S.acc;
-        if (V.low) { g.font = font(V.body, is); g.fillText(">", L, y); }
-        else if (V.schemes) g.fillRect(L, y + 6 * u, 30 * u, 30 * u);
-        else { g.beginPath(); g.arc(L + 12 * u, y + is * 0.55, 8 * u, 0, Math.PI * 2); g.fill(); }
+        if (V.low) { g.font = font(V.body, is); g.fillText(">", L, yk); }
+        else if (V.schemes) g.fillRect(L, yk + 6 * u, 30 * u, 30 * u);
+        else { g.beginPath(); g.arc(L + 12 * u, yk + is * 0.55, 8 * u, 0, Math.PI * 2); g.fill(); }
         g.font = font(V.body, is);
         g.fillStyle = S.fg;
-        g.fillText(it, L + 60 * u, y);
+        ls.forEach((ln, j) => g.fillText(ln, L + indent, yk + j * ilh));
       }, u);
+      y += ls.length * ilh + gap;
     });
   } else {
     const m = /^(\D*)(\d+(?:\.\d+)?)(.*)$/.exec(sc.value ?? "");
-    const vs = sz(230, 200), cy = ch * 0.45;
+    const vs = fitSize(g, V.head, sz(230, 200), sc.value ?? "", textW, true);
+    const ls = sz(44, 48), bs = sz(30, 40);
+    g.font = font(V.head, ls);
+    const label = wrapBalanced(g, sc.heading, textW);
+    g.font = font(V.body, bs);
+    const body = sc.body ? wrapBalanced(g, sc.body, textW) : [];
+    const blockH = vs * 1.1 + 24 * u + label.length * ls * 1.2 + (body.length ? 20 * u + body.length * bs * 1.35 : 0);
+    const top = (ch - blockH) / 2;
+    const yLabel = top + vs * 1.1 + 24 * u;
+    const yBody = yLabel + label.length * ls * 1.2 + 20 * u;
     g.textAlign = "center";
     enter(g, V, lt, 0, (raw) => {
       const cnt = V.low ? Math.floor(clamp01(raw * 1.6) * 6) / 6 : outCubic(clamp01(raw * 1.4));
@@ -242,17 +281,18 @@ function drawScene(g: Ctx, w: number, h: number, sc: TimedScene, i: number, lt: 
       }
       g.font = font(V.head, vs);
       g.fillStyle = V.schemes && i % 3 !== 0 ? S.fg : S.acc;
-      g.fillText(txt, w / 2, cy - vs * 0.55);
+      g.fillText(txt, w / 2, top);
     }, u);
-    enter(g, V, lt, D.statLabel, () => { g.font = font(V.head, sz(44, 48)); g.fillStyle = S.fg; g.fillText(sc.heading, w / 2, cy + vs * 0.55); }, u);
-    const body = sc.body;
-    if (body) enter(g, V, lt, D.statBody, () => { g.font = font(V.body, sz(30, 40)); g.fillStyle = S.dim; g.fillText(body, w / 2, cy + vs * 0.55 + 66 * u); }, u);
+    enter(g, V, lt, D.statLabel, () => { g.font = font(V.head, ls); g.fillStyle = S.fg; label.forEach((ln, k) => g.fillText(ln, w / 2, yLabel + k * ls * 1.2)); }, u);
+    if (body.length) enter(g, V, lt, D.statBody, () => { g.font = font(V.body, bs); g.fillStyle = S.dim; body.forEach((ln, k) => g.fillText(ln, w / 2, yBody + k * bs * 1.35)); }, u);
   }
 }
 
-// Every scene change has a transition: calm crossfade, punchy colour-bar slam, retro stepped block wipe.
+// Every scene change has a transition: calm crossfade, punchy colour-bar slam
+// (across in 16:9, up from the bottom in 9:16), retro stepped block wipe.
 function composite(g: Ctx, w: number, h: number, A: Scratch, B: Scratch, p: number, V: VibeStyle, k: number) {
-  const u = h / 720;
+  const u = Math.min(w, h) / 720;
+  const tall = h > w;
   if (V.low) {
     const cs = 20, cols = Math.ceil(w / cs), rows = Math.ceil(h / cs), max = cols + rows - 2;
     g.drawImage(A.c, 0, 0);
@@ -264,14 +304,16 @@ function composite(g: Ctx, w: number, h: number, A: Scratch, B: Scratch, p: numb
     const bar = sA.bg === "#ffd400" || sB.bg === "#ffd400" ? "#0a0a0a" : "#ffd400";
     if (p < 0.5) {
       const q = p / 0.5;
-      g.drawImage(A.c, -50 * u * q * q, 0);
-      const x = Math.floor(w * (1 - q * q));
+      g.drawImage(A.c, tall ? 0 : -50 * u * q * q, tall ? -50 * u * q * q : 0);
       g.fillStyle = bar;
-      g.fillRect(x, 0, w - x, h);
+      if (tall) { const y = Math.floor(h * (1 - q * q)); g.fillRect(0, y, w, h - y); }
+      else { const x = Math.floor(w * (1 - q * q)); g.fillRect(x, 0, w - x, h); }
     } else {
       g.drawImage(B.c, 0, 0);
-      const bw = Math.round(w * (1 - outCubic(clamp01((p - 0.5) / 0.4)))); // gone before the window ends
-      if (bw >= 1) { g.fillStyle = bar; g.fillRect(0, 0, bw, h); }
+      const r = 1 - outCubic(clamp01((p - 0.5) / 0.4)); // bar fully gone before the window ends
+      g.fillStyle = bar;
+      if (tall) { const bh = Math.round(h * r); if (bh >= 1) g.fillRect(0, 0, w, bh); }
+      else { const bw = Math.round(w * r); if (bw >= 1) g.fillRect(0, 0, bw, h); }
     }
   } else {
     const e = inOut(p);
@@ -299,14 +341,15 @@ function quantize(sc: Scratch, pal: string[]) {
   sc.g.putImageData(im, 0, 0);
 }
 
-export function renderFrame(ctx: Ctx, time: number, plan: Plan, vibe: Vibe): void {
+export function renderFrame(ctx: Ctx, time: number, plan: Plan, vibe: Vibe, format: Format = "16:9"): void {
   const V = VIBE_STYLES[vibe];
+  const { w: FW, h: FH } = frameSize(format);
   const tl = timeline(plan);
   const total = tl[tl.length - 1].end;
   let t = Math.max(0, Math.min(time, total));
   if (V.low && V.fps) t = Math.floor(t * V.fps + 1e-6) / V.fps;
-  const w = V.low ? LW : W, h = V.low ? LH : H;
-  const out = scratch("out" + w, w, h);
+  const w = V.low ? FW / LOW : FW, h = V.low ? FH / LOW : FH;
+  const out = scratch("out", w, h);
   let k = -1;
   for (let i = 0; i < tl.length - 1; i++) if (Math.abs(t - tl[i].end) < V.tr / 2) { k = i; break; }
   out.g.setTransform(1, 0, 0, 1, 0, 0);
@@ -316,7 +359,7 @@ export function renderFrame(ctx: Ctx, time: number, plan: Plan, vibe: Vibe): voi
     if (i < 0) i = tl.length - 1;
     drawScene(out.g, w, h, tl[i], i, t - tl[i].start, V, t);
   } else {
-    const A = scratch("A" + w, w, h), B = scratch("B" + w, w, h);
+    const A = scratch("A", w, h), B = scratch("B", w, h);
     drawScene(A.g, w, h, tl[k], k, t - tl[k].start, V, t);
     drawScene(B.g, w, h, tl[k + 1], k + 1, t - tl[k + 1].start, V, t);
     composite(out.g, w, h, A, B, (t - (tl[k].end - V.tr / 2)) / V.tr, V, k);
@@ -324,15 +367,16 @@ export function renderFrame(ctx: Ctx, time: number, plan: Plan, vibe: Vibe): voi
   if (V.low && V.pal) quantize(out, V.pal);
   ctx.save();
   ctx.imageSmoothingEnabled = !V.low;
-  ctx.drawImage(out.c, 0, 0, W, H);
+  ctx.drawImage(out.c, 0, 0, FW, FH);
   ctx.restore();
 }
 
 /** renderFrame plus the test-only sync marker: white for 0.1 s from each scene change. */
-export function drawFrame(ctx: Ctx, t: number, plan: Plan, vibe: Vibe, probe = false): void {
-  renderFrame(ctx, t, plan, vibe);
+export function drawFrame(ctx: Ctx, t: number, plan: Plan, vibe: Vibe, probe = false, format: Format = "16:9"): void {
+  renderFrame(ctx, t, plan, vibe, format);
   if (probe && timeline(plan).slice(0, -1).some((s) => t >= s.end - 1e-9 && t < s.end + 0.1)) {
+    const { w, h } = frameSize(format);
     ctx.fillStyle = "#fff";
-    ctx.fillRect(0, 0, W, H);
+    ctx.fillRect(0, 0, w, h);
   }
 }
