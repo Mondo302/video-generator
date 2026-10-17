@@ -17,12 +17,14 @@ export type Sandbox = {
 const DEADLINE = { load: 5000, frame: 2000, audio: 15000 } as const;
 const SR = 48000;
 
+// Classic Worker (module Workers from blob URLs fail inside an opaque-origin iframe). The module's own
+// source is placed inside an async function, its top-level "export" keywords removed, so its names stay private.
 const WORKER_SRC = `
 let mod = null, cv = null, cx = null, W = 0, H = 0;
 onmessage = async (e) => { const m = e.data; try {
   if (m.op === 'load') {
-    mod = await import(m.url);
-    if (typeof mod.renderFrame !== 'function' || typeof mod.renderAudio !== 'function' || !mod.meta) throw new Error('The module must export meta, renderFrame and renderAudio.');
+    mod = await self.__module;
+    if (!mod || typeof mod.renderFrame !== 'function' || typeof mod.renderAudio !== 'function' || !mod.meta) throw new Error('The module must export meta, renderFrame and renderAudio.');
     W = m.W; H = m.H; cv = new OffscreenCanvas(W, H); cx = cv.getContext('2d');
     postMessage({ id: m.id, ok: true, meta: JSON.parse(JSON.stringify(mod.meta)) });
   } else if (m.op === 'frame') {
@@ -33,16 +35,26 @@ onmessage = async (e) => { const m = e.data; try {
   }
 } catch (err) { postMessage({ id: m.id, ok: false, error: String((err && err.stack) || err) }); } };`;
 
+/** The module as a classic script body: top-level "export " removed, exports returned from an async function. */
+export function toWorkerScript(code: string): string {
+  const body = code.replace(/^export\s+(?=(?:const|let|var|function|async|class)\b)/gm, "");
+  return `self.__module = (async () => {
+${body}
+;return { meta: typeof meta === "undefined" ? undefined : meta, renderFrame: typeof renderFrame === "undefined" ? undefined : renderFrame, renderAudio: typeof renderAudio === "undefined" ? undefined : renderAudio };
+})();
+self.__module.catch(() => {});
+` + WORKER_SRC;
+}
+
 function childDocument(W: number, H: number): string {
   return `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' blob:; worker-src blob:">
 <script>
-const WORKER_SRC = ${JSON.stringify(WORKER_SRC)};
 let worker = null, codeUrl = null, mod = null;
 const toParent = (d, transfer) => parent.postMessage(d, '*', transfer || []);
 addEventListener('message', async (e) => { if (e.source !== parent) return; const m = e.data; try {
   if (m.op === 'load') {
     codeUrl = URL.createObjectURL(new Blob([m.code], { type: 'text/javascript' }));
-    worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' })), { type: 'module' });
+    worker = new Worker(URL.createObjectURL(new Blob([m.script], { type: 'text/javascript' })));
     worker.onmessage = (ev) => toParent(ev.data, ev.data.bmp ? [ev.data.bmp] : []);
     worker.onerror = (ev) => toParent({ id: m.id, ok: false, error: 'Worker error: ' + (ev.message || 'unknown') });
     worker.postMessage({ id: m.id, op: 'load', url: codeUrl, W: ${W}, H: ${H} });
@@ -111,7 +123,7 @@ export function createSandbox(width: number, height: number): Sandbox {
 
   return {
     get destroyed() { return destroyed; },
-    async load(code) { return (await rpc("load", { code })).meta as SandboxMeta; },
+    async load(code) { return (await rpc("load", { code, script: toWorkerScript(code) })).meta as SandboxMeta; },
     async frame(t) { const d = await rpc("frame", { t }); return { bitmap: d.bmp as ImageBitmap, ms: d.ms as number }; },
     async audio(durationSec) { return (await rpc("audio", { dur: durationSec })).chans as Float32Array[]; },
     destroy,
