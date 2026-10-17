@@ -1,9 +1,19 @@
-import { generatePlan, MODEL } from "@/lib/generate";
+import { after } from "next/server";
+import { supabaseCodeVideoStore } from "@/lib/code-video-store";
+import { CODE_MODEL, generateCode } from "@/lib/generate-code";
+import { videoJobs } from "@/lib/job-registry";
 import { createClient } from "@/lib/supabase/server";
-import { supabaseVideoStore } from "@/lib/video-store";
-import { handleCreateVideo } from "@/lib/videos-handler";
+import { handleCreate } from "@/lib/video-jobs";
 
+// Code engine: 202 {id} at once, the model call runs after the response (next/server after()).
+// The old plan path (src/lib/videos-handler.ts) is no longer routed; old plan rows still play.
 export async function POST(request: Request) {
-  const store = supabaseVideoStore(await createClient());
-  return handleCreateVideo(request, { store, generatePlan, model: MODEL });
+  const store = supabaseCodeVideoStore(await createClient());
+  return handleCreate(request, {
+    store,
+    generateCode,
+    model: CODE_MODEL,
+    jobs: videoJobs(),
+    schedule: (task) => after(task),
+  });
 }
