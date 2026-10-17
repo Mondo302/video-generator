@@ -57,9 +57,11 @@ export function CreateVideoForm() {
       setError(
         res.status === 401
           ? "Your session has expired. Reload the page, then try again."
-          : res.status === 502
-            ? "The model did not return a usable video plan. Try again."
-            : "Something went wrong on the server. Try again.",
+          : res.status === 504
+            ? "That took too long. Try again."
+            : res.status === 502
+              ? "The model did not return a usable video plan. Try again."
+              : "Something went wrong on the server. Try again.",
       );
       setPhase("error");
     } catch {

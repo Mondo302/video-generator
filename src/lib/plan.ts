@@ -9,18 +9,24 @@ export type Vibe = (typeof VIBES)[number];
 export const SCENE_TYPES = ["title", "text", "list", "stat"] as const;
 export const MAX_TOTAL_SECONDS = 45;
 
+// The model has ended over-long titles on a junk glyph ("...the first™").
+// A refine (not a regex) keeps this out of the strict JSON schema sent to OpenAI.
+const JUNK_GLYPHS = /[™®©]/;
+const text = (max: number) =>
+  z.string().max(max).refine((s) => !JUNK_GLYPHS.test(s), { message: "contains ™, ® or ©" });
+
 export const SceneSchema = z.object({
   type: z.enum(SCENE_TYPES),
   duration_s: z.number().min(2).max(8),
-  heading: z.string().max(60),
-  body: z.string().max(140).nullable(),
-  items: z.array(z.string().max(40)).max(4).nullable(),
-  value: z.string().max(12).nullable(),
+  heading: text(60),
+  body: text(140).nullable(),
+  items: z.array(text(40)).max(4).nullable(),
+  value: text(12).nullable(),
 });
 
 export const PlanSchema = z
   .object({
-    title: z.string().max(60),
+    title: text(60),
     scenes: z.array(SceneSchema).min(3).max(8),
   })
   .refine((plan) => totalSeconds(plan) <= MAX_TOTAL_SECONDS, {

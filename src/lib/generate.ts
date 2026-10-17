@@ -19,6 +19,7 @@ Write for the vibe:
 
 Rules:
 - One idea per scene. Plain words a busy business owner understands.
+- Keep the title and every heading to 45 characters or fewer.
 - Start with a title scene. Then choose each scene type on purpose:
   "list" when there are 2 to 4 parallel points;
   "stat" only when the topic itself contains the number, copied exactly. Never invent or estimate a figure;

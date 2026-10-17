@@ -168,11 +168,38 @@ describe("POST /api/videos handler", () => {
     assert.equal(store.rows[0].status, "failed");
     assert.equal(store.rows[0].error, "cancelled");
   });
+
+  it("504 and a failed / timeout row when the model passes the time limit, even if it ignores the signal", { timeout: 2000 }, async () => {
+    const store = memoryStore("user-a");
+    let sawAbort = false;
+    const generatePlan: GeneratePlan = (_input, { signal }) => {
+      signal.addEventListener("abort", () => {
+        sawAbort = true;
+      });
+      return new Promise(() => {}); // never settles: a stuck upstream call
+    };
+    const res = await handleCreateVideo(post(GOOD_BODY), { store, generatePlan, model: MODEL, timeoutMs: 20 });
+    assert.equal(res.status, 504);
+    assert.deepEqual(await res.json(), { error: "timeout" });
+    assert.equal(sawAbort, true, "the deadline also aborts the upstream call");
+    assert.equal(store.rows[0].status, "failed");
+    assert.equal(store.rows[0].error, "timeout");
+  });
 });
 
 describe("plan schema", () => {
   it("accepts a valid plan", () => {
     assert.equal(PlanSchema.safeParse(VALID_PLAN).success, true);
+  });
+  it("rejects the junk glyphs ™ ® © in any text field", () => {
+    const withGlyph = (scene: object) => ({ ...VALID_PLAN, scenes: [scene, ...VALID_PLAN.scenes.slice(1)] });
+    const title = VALID_PLAN.scenes[0];
+    assert.equal(PlanSchema.safeParse({ ...VALID_PLAN, title: "Why clients leave after the first™" }).success, false);
+    assert.equal(PlanSchema.safeParse(withGlyph({ ...title, heading: "Brand®" })).success, false);
+    assert.equal(PlanSchema.safeParse(withGlyph({ ...title, body: "Made by us ©" })).success, false);
+    assert.equal(PlanSchema.safeParse(withGlyph({ ...title, items: ["One™"] })).success, false);
+    assert.equal(PlanSchema.safeParse(withGlyph({ ...title, value: "40%®" })).success, false);
+    assert.equal(PlanSchema.safeParse({ ...VALID_PLAN, title: "Fair prices, (c) and TM spelled out" }).success, true);
   });
   it("rejects fewer than 3 scenes, more than 4 list items, and a total over 45 s", () => {
     assert.equal(PlanSchema.safeParse({ ...VALID_PLAN, scenes: VALID_PLAN.scenes.slice(0, 2) }).success, false);

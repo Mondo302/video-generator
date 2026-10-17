@@ -20,7 +20,13 @@ export type VideoStore = {
   markFailed(id: string, error: string, usage?: Usage): Promise<void>;
 };
 
-export type CreateVideoDeps = { store: VideoStore; generatePlan: GeneratePlan; model: string };
+export type CreateVideoDeps = {
+  store: VideoStore;
+  generatePlan: GeneratePlan;
+  model: string;
+  /** Defaults to MODEL_TIME_LIMIT_MS; tests pass a few milliseconds. */
+  timeoutMs?: number;
+};
 
 const VideoInput = z.object({
   prompt: z
@@ -32,6 +38,19 @@ const VideoInput = z.object({
 });
 
 const json = (status: number, body: unknown) => Response.json(body, { status });
+
+/** A generation that has not finished after this long is failed as a timeout (spec P0 #1: under 60 s). */
+export const MODEL_TIME_LIMIT_MS = 60_000;
+
+/** Resolves with the work, or rejects as soon as the signal aborts, whichever comes first. */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
 
 export async function handleCreateVideo(request: Request, deps: CreateVideoDeps): Promise<Response> {
   const { store } = deps;
@@ -56,13 +75,22 @@ export async function handleCreateVideo(request: Request, deps: CreateVideoDeps)
 
     rowId = await store.insertGenerating({ prompt, vibe, model: deps.model });
 
+    // One signal for both ways a generation ends early: the client leaves, or
+    // the deadline passes. Racing it also covers a generator that ignores it.
+    const deadline = AbortSignal.timeout(deps.timeoutMs ?? MODEL_TIME_LIMIT_MS);
+    const signal = AbortSignal.any([request.signal, deadline]);
+
     let generated: { plan: unknown; usage: Usage };
     try {
-      generated = await deps.generatePlan({ prompt, vibe }, { signal: request.signal });
+      generated = await untilAborted(deps.generatePlan({ prompt, vibe }, { signal }), signal);
     } catch (err) {
       if (request.signal.aborted) {
         await store.markFailed(rowId, "cancelled");
         return new Response(null, { status: 499 });
+      }
+      if (deadline.aborted) {
+        await store.markFailed(rowId, "timeout");
+        return json(504, { error: "timeout" });
       }
       // Upstream messages can echo request details; store and return only a code.
       const status = (err as { status?: unknown }).status;
