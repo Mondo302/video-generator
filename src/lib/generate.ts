@@ -19,8 +19,11 @@ Write for the vibe:
 
 Rules:
 - One idea per scene. Plain words a busy business owner understands.
-- Start with a title scene. Use "list" only for 2 to 4 short items.
-- Use "stat" only for a number you are sure is true. Never invent statistics.
+- Start with a title scene. Then choose each scene type on purpose:
+  "list" when there are 2 to 4 parallel points;
+  "stat" only when the topic itself contains the number, copied exactly. Never invent or estimate a figure;
+  otherwise "text".
+- Use at least two different scene types in every video.
 - Give longer scenes more time, and keep the whole video at 45 seconds or less.
 - No emoji, no em dashes, no hashtags.
 - Set fields a scene type does not use to null.`;
